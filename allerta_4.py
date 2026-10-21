@@ -1,8 +1,9 @@
-
 import os
 import re
 import asyncio
 import urllib.request
+import locale
+from datetime import datetime, timedelta
 from telegram.request import HTTPXRequest
 
 from bs4 import BeautifulSoup
@@ -28,7 +29,6 @@ INTERVALLO = 60
 NOME_JOB = "controllo_allerte_sicilia"
 
 # Chat iscritte al monitoraggio.
-# Nota: questi dati vengono persi quando il bot si riavvia.
 chat_ids = set()
 
 # Ultimo risultato inviato a ciascuna chat.
@@ -39,11 +39,35 @@ controllo_in_corso = False
 
 
 # ==================================================
+# FUNZIONE PER OTTENERE LA DATA DI DOMANI IN ITALIANO
+# ==================================================
+
+def ottieni_data_domani():
+    """Restituisce la data di domani formattata (es. 'giovedì 22 ottobre')
+       forzando la lingua italiana anche se il server è estero.
+    """
+    # Tenta di impostare la lingua italiana sul sistema
+    for loc in ['it_IT.UTF-8', 'it_IT', 'Italian_Italy']:
+        try:
+            locale.setlocale(locale.LC_TIME, loc)
+            break
+        except locale.Error:
+            continue
+
+    # Calcola la data di domani
+    domani = datetime.now() + timedelta(days=1)
+    
+    # Esempio di formato comune nei bollettini (es. "22 ottobre 2026" o simili)
+    # Restituiamo il giorno e il mese. Adattalo se sul sito la data è scritta diversamente.
+    return domani
+
+
+# ==================================================
 # LETTURA E ANALISI DEL BOLLETTINO
 # ==================================================
 
 def find_allerta2():
-    """Scarica il bollettino ed estrae le allerte della Sicilia."""
+    """Scarica il bollettino ed estrae le allerte della Sicilia per la giornata di domani."""
 
     req = urllib.request.Request(
         URL,
@@ -77,6 +101,26 @@ def find_allerta2():
             "Il testo scaricato non contiene allerte."
         )
 
+    # --- VERIFICA DELLA DATA DI DOMANI NEL TESTO ---
+    domani = ottieni_data_domani()
+    giorno_num = domani.strftime("%d").lstrip("0") # es. "22" anziché "02" se < 10
+    
+    # Ricaviamo il nome del mese in italiano
+    mesi_it = {
+        1: "gennaio", 2: "febbraio", 3: "marzo", 4: "aprile",
+        5: "maggio", 6: "giugno", 7: "luglio", 8: "agosto",
+        9: "settembre", 10: "ottobre", 11: "novembre", 12: "dicembre"
+    }
+    mese_nome = mesi_it[domani.month]
+    
+    # Pattern flessibile per cercare la data di domani nel testo (es. "22 ottobre" o "22/10")
+    pattern_data = rf"\b{giorno_num}\s+{mese_nome}\b"
+    
+    if not re.search(pattern_data, testo, re.IGNORECASE):
+        print(f"Attenzione: La data di domani ({giorno_num} {mese_nome}) non è stata ancora pubblicata o trovata nel bollettino.")
+        # Se preferisci bloccare l'invio finché non c'è la data giusta, puoi ritornare una lista vuota o sollevare eccezione:
+        return []
+
     pattern_blocchi = (
         r"((?:ORDINARIA|MODERATA|ELEVATA)"
         r"\s+CRITICIT[AÀ]\s*'?.*?)"
@@ -101,8 +145,6 @@ def find_allerta2():
             re.IGNORECASE
         ):
             continue
-        
-
 
         if not re.search(
             r"\bNord[-–‑]Orientale\s*,\s*versante\s+ionico\b",
@@ -145,8 +187,6 @@ def find_allerta2():
         if risultato not in allerte:
             allerte.append(risultato)
 
-    # Non confondere un'estrazione vuota con un risultato valido
-    # se il parser non ha trovato alcun blocco riconoscibile.
     if not blocchi:
         raise ValueError(
             "Nessun blocco di criticità riconosciuto. "
@@ -178,15 +218,12 @@ async def find_allerta(
     controllo_in_corso = True
 
     try:
-        # Esegue lo scaricamento e il parsing senza bloccare
-        # il ciclo asincrono del bot.
         allerte = await asyncio.to_thread(find_allerta2)
 
         allerte.sort(
             key=lambda a: (a["rischio"], a["livello"])
         )
 
-        # La firma identifica i livelli di rischio rilevati.
         firma = tuple(
             (a["rischio"], a["livello"])
             for a in allerte
@@ -205,17 +242,11 @@ async def find_allerta(
                 )
 
             messaggio = "\n".join(righe)
-
         else:
-           # messaggio = (
-           #     "ℹ️ Il parser non ha rilevato allerte "
-           #     "per la Sicilia nei blocchi analizzati."
-           # )
-           messaggio = None
+            messaggio = None
 
         for chat_id in list(chat_ids):
 
-            
             if ultimi_inviati.get(chat_id) == firma:
                 continue
 
@@ -238,13 +269,10 @@ async def find_allerta(
                 )
 
     except Exception as e:
-        # In caso di errore non invia un falso messaggio
-        # di assenza di allerte.
         print(f"Errore durante il controllo: {e}")
 
     finally:
         controllo_in_corso = False
-
 
 
 async def start(
@@ -270,10 +298,8 @@ async def start(
         "Riceverai una notifica quando cambia il risultato rilevato."
     )
 
-    
     if nuova_iscrizione:
         await find_allerta(context)
-
 
 
 async def stop(
@@ -294,13 +320,11 @@ async def stop(
             job.schedule_removal()
 
 
-
-
 def main():
     if not TOKEN:
         raise RuntimeError(
             "Token mancante. Imposta la variabile "
-            "d'ambiente TELEGRAM_BOT_TOKEN prima dell'avvio."
+            "d'ambiente TOKEN prima dell'avvio."
         )
 
     proxy = "http://proxy.server:3128"
